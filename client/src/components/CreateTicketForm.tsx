@@ -1,0 +1,81 @@
+import { useRef, useState, type FormEvent } from 'react';
+import { createTicketSchema, type FieldErrors } from '../../../shared/tickets.js';
+import { api, ApiError, errorMessage } from '../api.js';
+import { Icon } from './Icon.js';
+
+export function CreateTicketForm({ onCreated }: { onCreated: (id: number) => void }) {
+  const [title, setTitle] = useState('');
+  const [description, setDescription] = useState('');
+  const [errors, setErrors] = useState<FieldErrors>({});
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const submitting = useRef(false);
+  const titleRef = useRef<HTMLInputElement>(null);
+  const descriptionRef = useRef<HTMLTextAreaElement>(null);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (submitting.current) return;
+    setError(null);
+    const result = createTicketSchema.safeParse({ title, description });
+    if (!result.success) {
+      const fields: FieldErrors = {};
+      for (const issue of result.error.issues) {
+        const name = issue.path[0];
+        if ((name === 'title' || name === 'description') && !fields[name]) fields[name] = issue.message;
+      }
+      setErrors(fields);
+      if (fields.title) titleRef.current?.focus();
+      else descriptionRef.current?.focus();
+      return;
+    }
+    setErrors({});
+    submitting.current = true;
+    setPending(true);
+    try {
+      const { ticket } = await api.create(result.data);
+      setTitle('');
+      setDescription('');
+      onCreated(ticket.id);
+    } catch (cause) {
+      setError(errorMessage(cause));
+      if (cause instanceof ApiError && cause.fields) setErrors(cause.fields);
+    } finally {
+      submitting.current = false;
+      setPending(false);
+    }
+  }
+
+  return (
+    <aside className="panel create-panel" aria-labelledby="create-heading">
+      <div className="panel-heading">
+        <span className="heading-icon"><Icon name="plus" /></span>
+        <div><h2 id="create-heading">פנייה חדשה</h2><p>איך אפשר לעזור?</p></div>
+      </div>
+      <form onSubmit={submit} noValidate className="create-form">
+        <div className="field">
+          <label htmlFor="ticket-title">כותרת <span className="required" aria-hidden="true">*</span></label>
+          <input ref={titleRef} id="ticket-title" placeholder="בקצרה, במה הפנייה עוסקת?" value={title} required
+            disabled={pending} aria-invalid={!!errors.title} aria-describedby={errors.title ? 'title-error' : 'title-hint'}
+            onChange={(e) => { setTitle(e.target.value); setErrors((previous) => ({ ...previous, title: undefined })); }} />
+          {errors.title ? <p className="field-error" id="title-error" role="alert">{errors.title}</p>
+            : <p className="field-hint" id="title-hint"><bdi>3–100</bdi> תווים, שדה חובה</p>}
+        </div>
+        <div className="field">
+          <div className="label-line"><label htmlFor="ticket-description">תיאור</label><span>אופציונלי</span></div>
+          <textarea ref={descriptionRef} id="ticket-description" placeholder="פרטים נוספים שיעזרו לנו לטפל בפנייה..." rows={6}
+            value={description} disabled={pending} aria-invalid={!!errors.description}
+            aria-describedby={errors.description ? 'description-error' : 'description-hint'}
+            onChange={(e) => { setDescription(e.target.value); setErrors((previous) => ({ ...previous, description: undefined })); }} />
+          {errors.description ? <p className="field-error" id="description-error" role="alert">{errors.description}</p>
+            : <p className="field-hint counter" id="description-hint"><span>עד 2,000 תווים</span><bdi>{description.length.toLocaleString('he-IL')} / 2,000</bdi></p>}
+        </div>
+        <p className="new-status-note"><span className="status-dot" />פנייה חדשה תיפתח בסטטוס ״פתוחה״</p>
+        {error && <div className="error-banner" role="alert"><Icon name="error" /><p>{error}</p></div>}
+        <button type="submit" className="button button-primary create-button" disabled={pending}>
+          {pending ? <span className="spinner" /> : <Icon name="plus" />}{pending ? 'יוצר פנייה…' : 'צור פנייה'}
+        </button>
+      </form>
+    </aside>
+  );
+}
