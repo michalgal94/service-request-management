@@ -19,7 +19,12 @@ export const createTicketSchema = z.object({
     .max(2000, 'התיאור יכול להכיל עד 2,000 תווים.').trim().default(''),
 }).strict();
 
-export const updateStatusSchema = z.object({ status: statusSchema }).strict();
+export const updateStatusSchema = z.object({
+  status: statusSchema,
+  expectedVersion: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+}).strict();
+
+export const idempotencyKeySchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 
 export const listTicketsSchema = z.object({
   q: z.string().trim().max(100, 'החיפוש יכול להכיל עד 100 תווים.').default(''),
@@ -39,6 +44,7 @@ export interface Ticket {
   description: string;
   status: TicketStatus;
   created_at: string;
+  version: number;
 }
 
 export interface TicketListResponse {
@@ -47,5 +53,10 @@ export interface TicketListResponse {
 }
 
 export interface ApiErrorBody {
-  error: { message: string; fields?: Record<string, string> };
+  error: {
+    message: string;
+    fields?: Record<string, string>;
+    code?: 'VERSION_CONFLICT' | 'IDEMPOTENCY_KEY_REUSED';
+    currentTicket?: Ticket;
+  };
 }

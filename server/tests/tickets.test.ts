@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import request from 'supertest';
 import { createApp } from '../app.js';
 import { openDatabase } from '../database.js';
@@ -52,6 +52,7 @@ describe('ticket HTTP API with a real SQLite database', () => {
     assert.equal(body.ticket.description, '');
     assert.equal(body.ticket.status, 'open');
     assert.equal(body.ticket.id, 1);
+    assert.equal(body.ticket.version, 1);
     assert.ok(Number.isFinite(Date.parse(body.ticket.created_at)));
     assert.ok(Math.abs(Date.now() - Date.parse(body.ticket.created_at)) < 5000);
     await request(app).post('/api/tickets').send({ title: 'פנייה חדשה', id: 12, status: 'closed', created_at: 'yesterday' }).expect(400);
@@ -96,15 +97,20 @@ describe('ticket HTTP API with a real SQLite database', () => {
     assert.equal((await request(app).get('/api/tickets')).body.pagination.total, 1);
   });
 
-  it('allows every status transition and updates only the status', async () => {
+  it('allows every status transition while preserving ticket content', async () => {
     const { body } = await request(app).post('/api/tickets').send({ title: 'פנייה לבדיקה' });
+    let version = body.ticket.version;
     for (const status of ['closed', 'open', 'in_progress', 'closed', 'in_progress', 'open']) {
-      const updated = await request(app).patch(`/api/tickets/${body.ticket.id}/status`).send({ status }).expect(200);
-      assert.deepEqual(updated.body.ticket, { ...body.ticket, status });
+      const updated = await request(app).patch(`/api/tickets/${body.ticket.id}/status`).send({ status, expectedVersion: version }).expect(200);
+      version += 1;
+      assert.deepEqual(updated.body.ticket, { ...body.ticket, status, version });
     }
-    await request(app).patch('/api/tickets/1/status').send({ status: 'deleted' }).expect(400);
-    await request(app).patch('/api/tickets/1/status').send({ status: 'closed', title: 'modified' }).expect(400);
-    await request(app).patch('/api/tickets/999/status').send({ status: 'open' }).expect(404);
+    await request(app).patch('/api/tickets/1/status').send({ status: 'deleted', expectedVersion: version }).expect(400);
+    await request(app).patch('/api/tickets/1/status').send({ status: 'closed', expectedVersion: version, title: 'modified' }).expect(400);
+    await request(app).patch('/api/tickets/999/status').send({ status: 'open', expectedVersion: 1 }).expect(404);
+    for (const expectedVersion of [undefined, 0, -1, 1.5, '1']) {
+      await request(app).patch('/api/tickets/1/status').send({ status: 'open', expectedVersion }).expect(400);
+    }
     for (const id of ['abc', '0', '-1', '1.5', '9007199254740992']) {
       await request(app).patch(`/api/tickets/${id}/status`).send({ status: 'open' }).expect(400);
     }
@@ -116,7 +122,8 @@ describe('ticket HTTP API with a real SQLite database', () => {
     }
     const last = await request(app).get('/api/tickets?status=open&page=2');
     assert.equal(last.body.tickets.length, 1);
-    await request(app).patch(`/api/tickets/${last.body.tickets[0].id}/status`).send({ status: 'closed' }).expect(200);
+    await request(app).patch(`/api/tickets/${last.body.tickets[0].id}/status`)
+      .send({ status: 'closed', expectedVersion: last.body.tickets[0].version }).expect(200);
     const updated = await request(app).get('/api/tickets?status=open&page=2').expect(200);
     assert.equal(updated.body.tickets.length, 0);
     assert.equal(updated.body.pagination.totalPages, 1);
@@ -140,6 +147,60 @@ describe('ticket HTTP API with a real SQLite database', () => {
     assert.ok(body.error.message);
     assert.equal(JSON.stringify(body).includes('no such table'), false);
   });
+
+  it('replays concurrent creates with the same key and rejects a changed payload', async () => {
+    const responses = await Promise.all(Array.from({ length: 5 }, () => request(app)
+      .post('/api/tickets').set('Idempotency-Key', 'same-create-request')
+      .send({ title: 'פנייה ללא כפילויות', description: 'אותו תוכן' }).expect(201)));
+    for (const response of responses) assert.deepEqual(response.body, responses[0]!.body);
+    const replay = await request(app).post('/api/tickets').set('Idempotency-Key', 'same-create-request')
+      .send({ title: '  פנייה ללא כפילויות  ', description: 'אותו תוכן' }).expect(201);
+    assert.equal(replay.headers['idempotency-replayed'], 'true');
+    assert.deepEqual(replay.body, responses[0]!.body);
+    const conflict = await request(app).post('/api/tickets').set('Idempotency-Key', 'same-create-request')
+      .send({ title: 'תוכן אחר' }).expect(409);
+    assert.equal(conflict.body.error.code, 'IDEMPOTENCY_KEY_REUSED');
+    assert.equal((await request(app).get('/api/tickets')).body.pagination.total, 1);
+
+    const separate = await request(app).post('/api/tickets').set('Idempotency-Key', 'another-create-request')
+      .send({ title: 'פנייה ללא כפילויות', description: 'אותו תוכן' }).expect(201);
+    assert.notEqual(separate.body.ticket.id, replay.body.ticket.id);
+    for (const key of ['', 'bad key', 'a'.repeat(129)]) {
+      await request(app).post('/api/tickets').set('Idempotency-Key', key).send({ title: 'פנייה לבדיקה' }).expect(400);
+    }
+  });
+
+  it('rolls back the ticket if recording its idempotency key fails', async () => {
+    db.exec(`CREATE TRIGGER reject_creation_key BEFORE INSERT ON ticket_creation_requests
+      BEGIN SELECT RAISE(ABORT, 'simulated storage failure'); END;`);
+    await request(app).post('/api/tickets').set('Idempotency-Key', 'retry-after-rollback')
+      .send({ title: 'פנייה אטומית' }).expect(500);
+    assert.equal((await request(app).get('/api/tickets')).body.pagination.total, 0);
+    db.exec('DROP TRIGGER reject_creation_key');
+    await request(app).post('/api/tickets').set('Idempotency-Key', 'retry-after-rollback')
+      .send({ title: 'פנייה אטומית' }).expect(201);
+    assert.equal((await request(app).get('/api/tickets')).body.pagination.total, 1);
+  });
+
+  it('rejects stale status updates without overwriting another client', async () => {
+    const { body } = await request(app).post('/api/tickets').send({ title: 'עדכונים מקבילים' }).expect(201);
+    const path = `/api/tickets/${body.ticket.id}/status`;
+    const responses = await Promise.all(['in_progress', 'closed'].map((status) =>
+      request(app).patch(path).send({ status, expectedVersion: body.ticket.version })));
+    assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
+    const winner = responses.find((response) => response.status === 200)!;
+    const conflict = responses.find((response) => response.status === 409)!;
+    assert.equal(winner.body.ticket.version, 2);
+    assert.equal(conflict.body.error.code, 'VERSION_CONFLICT');
+    assert.deepEqual(conflict.body.error.currentTicket, winner.body.ticket);
+
+    await request(app).patch(path).send({ status: 'open', expectedVersion: 2 }).expect(200);
+    await request(app).patch(path).send({ status: 'closed', expectedVersion: 1 }).expect(409);
+    const current = (await request(app).get('/api/tickets')).body.tickets[0];
+    assert.equal(current.status, 'open');
+    assert.equal(current.version, 3);
+    await request(app).patch(path).send({ status: 'closed', expectedVersion: 3 }).expect(200);
+  });
 });
 
 it('persists records and status updates after closing and reopening the SQLite file', async () => {
@@ -149,8 +210,10 @@ it('persists records and status updates after closing and reopening the SQLite f
   try {
     db = openDatabase(path);
     let app = createApp(db);
-    const { body } = await request(app).post('/api/tickets').send({ title: 'נשמרת לאחר הפעלה מחדש' }).expect(201);
-    await request(app).patch(`/api/tickets/${body.ticket.id}/status`).send({ status: 'in_progress' }).expect(200);
+    const input = { title: 'נשמרת לאחר הפעלה מחדש' };
+    const { body } = await request(app).post('/api/tickets').set('Idempotency-Key', 'persistent-create').send(input).expect(201);
+    await request(app).patch(`/api/tickets/${body.ticket.id}/status`)
+      .send({ status: 'in_progress', expectedVersion: body.ticket.version }).expect(200);
     db.close();
     db = undefined;
     db = openDatabase(path);
@@ -160,6 +223,47 @@ it('persists records and status updates after closing and reopening the SQLite f
     assert.equal(list.body.pagination.total, 1);
     assert.equal(list.body.tickets[0].title, body.ticket.title);
     assert.equal(list.body.tickets[0].status, 'in_progress');
+    assert.equal(list.body.tickets[0].version, 2);
+    const replay = await request(app).post('/api/tickets').set('Idempotency-Key', 'persistent-create').send(input).expect(201);
+    assert.deepEqual(replay.body, body);
+    assert.equal(replay.headers['idempotency-replayed'], 'true');
+    assert.equal((await request(app).get('/api/tickets')).body.pagination.total, 1);
+  } finally {
+    db?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+it('upgrades a version 1 database without changing existing ticket data', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'service-tickets-migration-'));
+  const path = join(directory, 'tickets.sqlite');
+  let db: DatabaseSync | undefined;
+  try {
+    db = new DatabaseSync(path);
+    db.exec(`
+      CREATE TABLE tickets (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'open',
+        created_at TEXT NOT NULL
+      ) STRICT;
+      INSERT INTO tickets (id, title, description, status, created_at)
+      VALUES (7, 'Existing ticket', 'Keep this description', 'closed', '2026-01-01T10:00:00.000Z');
+      PRAGMA user_version = 1;
+    `);
+    const before = db.prepare('SELECT * FROM tickets').get();
+    db.close();
+    db = undefined;
+    db = openDatabase(path);
+    assert.deepEqual({ ...db.prepare('SELECT * FROM tickets').get() }, { ...before, version: 1 });
+    assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 2);
+    assert.equal(seedDatabaseIfEmpty(db), false);
+    db.prepare('SELECT * FROM ticket_creation_requests').all();
+    db.close();
+    db = undefined;
+    db = openDatabase(path);
+    assert.deepEqual({ ...db.prepare('SELECT * FROM tickets').get() }, { ...before, version: 1 });
   } finally {
     db?.close();
     rmSync(directory, { recursive: true, force: true });

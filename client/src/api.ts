@@ -1,7 +1,7 @@
 import type { ApiErrorBody, CreateTicketInput, Ticket, TicketFilters, TicketListResponse, TicketStatus } from '../../shared/tickets.js';
 
 export class ApiError extends Error {
-  constructor(message: string, public readonly fields?: Record<string, string>) {
+  constructor(message: string, public readonly fields?: Record<string, string>, public readonly code?: ApiErrorBody['error']['code']) {
     super(message);
     this.name = 'ApiError';
   }
@@ -25,7 +25,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   if (!response.ok) {
     const body = await response.json().catch(() => null) as ApiErrorBody | null;
-    throw new ApiError(body?.error?.message ?? 'לא ניתן להשלים את הבקשה. אפשר לנסות שוב.', body?.error?.fields);
+    throw new ApiError(body?.error?.message ?? 'לא ניתן להשלים את הבקשה. אפשר לנסות שוב.', body?.error?.fields, body?.error?.code);
   }
   return response.json() as Promise<T>;
 }
@@ -35,11 +35,17 @@ export const api = {
     const params = new URLSearchParams({ q: filters.q, status: filters.status, page: String(page) });
     return request<TicketListResponse>(`/tickets?${params}`, { signal });
   },
-  create(input: CreateTicketInput) {
-    return request<{ ticket: Ticket }>('/tickets', { method: 'POST', body: JSON.stringify(input) });
+  create(input: CreateTicketInput, idempotencyKey: string) {
+    return request<{ ticket: Ticket }>('/tickets', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify(input),
+    });
   },
-  updateStatus(id: number, status: TicketStatus) {
-    return request<{ ticket: Ticket }>(`/tickets/${id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) });
+  updateStatus(id: number, status: TicketStatus, expectedVersion: number) {
+    return request<{ ticket: Ticket }>(`/tickets/${id}/status`, {
+      method: 'PATCH', body: JSON.stringify({ status, expectedVersion }),
+    });
   },
 };
 

@@ -189,7 +189,7 @@ test('ignores an older search response even when fetch cancellation is unavailab
     if (q !== 'ישן' && q !== 'חדש') return route.continue();
     if (q === 'ישן') await new Promise((resolve) => setTimeout(resolve, 700));
     return route.fulfill({ json: {
-      tickets: [{ id: q === 'ישן' ? 800 : 900, title: `תשובה ${q}`, description: '', status: 'open', created_at: new Date().toISOString() }],
+      tickets: [{ id: q === 'ישן' ? 800 : 900, title: `תשובה ${q}`, description: '', status: 'open', created_at: new Date().toISOString(), version: 1 }],
       pagination: { page: 1, pageSize: 10, total: 1, totalPages: 1 },
     } });
   });
@@ -264,4 +264,113 @@ test('allows every status transition and handles an empty first page after an up
   await expect(createButton(page)).toBeEnabled();
   await expect(filter(page)).toHaveValue('open');
   await expect(searchInput(page)).toHaveValue(title);
+});
+
+test('validates while typing after the first submission attempt and resets after success', async ({ page }) => {
+  await page.goto('/');
+  const title = page.getByRole('textbox', { name: 'כותרת', exact: false });
+  const description = page.getByRole('textbox', { name: 'תיאור', exact: true });
+  await title.fill('א');
+  await expect(page.locator('#title-error')).toHaveCount(0);
+  await createButton(page).click();
+  await expect(page.locator('#title-error')).toBeVisible();
+  await title.fill(' אב ');
+  await expect(page.locator('#title-error')).toHaveText('הכותרת צריכה להכיל לפחות 3 תווים.');
+  await title.fill('אבג');
+  await expect(page.locator('#title-error')).toHaveCount(0);
+  await title.fill('א'.repeat(101));
+  await expect(page.locator('#title-error')).toHaveText('הכותרת יכולה להכיל עד 100 תווים.');
+  await description.fill('ב'.repeat(2001));
+  await expect(page.locator('#description-error')).toHaveText('התיאור יכול להכיל עד 2,000 תווים.');
+  await title.fill('בדיקת ולידציה בזמן הקלדה');
+  await expect(page.locator('#title-error')).toHaveCount(0);
+  await expect(page.locator('#description-error')).toBeVisible();
+  await description.fill('ב'.repeat(2000));
+  await expect(page.locator('#description-error')).toHaveCount(0);
+  await createButton(page).click();
+  await expect(title).toHaveValue('');
+  await expect(rows(page).first()).toContainText('בדיקת ולידציה בזמן הקלדה');
+  await title.fill('א');
+  await expect(page.locator('#title-error')).toHaveCount(0);
+});
+
+test('retries a saved create whose response was lost without creating a duplicate', async ({ page, request }) => {
+  await page.goto('/');
+  await expect(rows(page)).toHaveCount(10);
+  const titleText = 'בדיקת תשובה שאבדה אחרי שמירה';
+  const title = page.getByRole('textbox', { name: 'כותרת', exact: false });
+  const description = page.getByRole('textbox', { name: 'תיאור', exact: true });
+  const keys: string[] = [];
+  let savedId = 0;
+  await page.route('**/api/tickets', async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    keys.push(route.request().headers()['idempotency-key'] ?? '');
+    if (keys.length > 1) return route.continue();
+    const saved = await route.fetch();
+    expect(saved.status()).toBe(201);
+    savedId = (await saved.json()).ticket.id;
+    await route.abort('failed');
+  });
+  await title.fill(titleText);
+  await description.fill('המידע נשמר למרות כשל בתקשורת');
+  await createButton(page).click();
+  await expect(page.getByRole('alert')).toContainText('לא ניתן להתחבר לשרת');
+  await expect(title).toHaveValue(titleText);
+  await expect(description).toHaveValue('המידע נשמר למרות כשל בתקשורת');
+  const saved = await request.get('/api/tickets', { params: { q: titleText } });
+  expect((await saved.json()).pagination.total).toBe(1);
+  const replay = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith('/api/tickets'));
+  await createButton(page).click();
+  const response = await replay;
+  expect(response.status()).toBe(201);
+  expect(response.headers()['idempotency-replayed']).toBe('true');
+  await expect(title).toHaveValue('');
+  await expect(rows(page).first()).toContainText(titleText);
+  expect(keys).toHaveLength(2);
+  expect(keys[0]).toBeTruthy();
+  expect(keys[1]).toBe(keys[0]);
+  const final = await request.get('/api/tickets', { params: { q: titleText } });
+  const result = await final.json();
+  expect(result.pagination.total).toBe(1);
+  expect(result.tickets[0].id).toBe(savedId);
+});
+
+test('detects a stale status update from another tab and keeps the applied filters', async ({ page, context, request }) => {
+  const title = 'בדיקת עדכון בשני חלונות';
+  const created = await request.post('/api/tickets', { data: { title } });
+  expect(created.status()).toBe(201);
+  const { ticket } = await created.json();
+  const other = await context.newPage();
+  try {
+    for (const tab of [page, other]) {
+      await tab.goto('/');
+      await searchInput(tab).fill(title);
+      await filter(tab).selectOption('open');
+      await searchButton(tab).click();
+      await expect(rows(tab)).toHaveCount(1);
+    }
+    await rows(other).first().getByRole('combobox').selectOption('in_progress');
+    await expect(other.getByRole('heading', { name: 'לא נמצאו פניות' })).toBeVisible();
+    const conflict = page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith(`/api/tickets/${ticket.id}/status`));
+    await rows(page).first().getByRole('combobox').selectOption('closed');
+    expect((await conflict).status()).toBe(409);
+    await expect(page.getByRole('alert')).toContainText('עודכנה בינתיים על ידי משתמש אחר');
+    await expect(page.getByRole('heading', { name: 'לא נמצאו פניות' })).toBeVisible();
+    await expect(searchInput(page)).toHaveValue(title);
+    await expect(filter(page)).toHaveValue('open');
+    const current = await request.get('/api/tickets', { params: { q: title } });
+    expect((await current.json()).tickets[0]).toMatchObject({ status: 'in_progress', version: 2 });
+    await filter(page).selectOption('');
+    await searchButton(page).click();
+    await expect(rows(page)).toHaveCount(1);
+    const retry = page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith(`/api/tickets/${ticket.id}/status`));
+    await rows(page).first().getByRole('combobox').selectOption('closed');
+    const updated = await retry;
+    expect(updated.status()).toBe(200);
+    expect((await updated.json()).ticket).toMatchObject({ status: 'closed', version: 3 });
+    await expect(rows(page).first().getByRole('combobox')).toHaveValue('closed');
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  } finally {
+    await other.close();
+  }
 });

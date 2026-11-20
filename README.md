@@ -80,6 +80,9 @@ Tickets are stored in `data/tickets.sqlite`. This is a file on disk, so creating
 - `description`: Optional text; an omitted description becomes an empty string
 - `status`: `open`, `in_progress`, or `closed`
 - `created_at`: Server-generated timestamp in UTC
+- `version`: Starts at 1 and increases with every status update
+
+The `ticket_creation_requests` table stores each creation key, a hash of the validated input, and the original response. The ticket and this record are saved in the same transaction. This lets the server safely replay a successful create even after a restart.
 
 Dates are displayed in the `Asia/Jerusalem` time zone. Status labels are `open` = פתוחה, `in_progress` = בטיפול, and `closed` = סגורה.
 
@@ -93,18 +96,20 @@ Editing `server/seed.ts` changes the examples used for a new database; it doesn'
 
 The 25 examples include different statuses, different dates, and empty descriptions. They are inserted from oldest to newest, so newer examples receive larger ticket numbers. Listing uses `created_at DESC, id DESC`: date comes first, and the larger number wins when two timestamps match.
 
-The schema version is stored in SQLite's `user_version`. The table uses `STRICT`, `NOT NULL`, and `CHECK` constraints for allowed statuses and maximum lengths. Zod checks the full input rules before a write. Queries use bound parameters, and indexes support sorting and status filtering. SQLite runs in WAL mode with a busy timeout.
+The schema version is stored in SQLite's `user_version`. The current version is 2. Existing databases are upgraded automatically in a transaction: tickets keep their data and receive an initial version of 1. The tables use `STRICT`, `NOT NULL`, and `CHECK` constraints for allowed values and maximum lengths. Zod checks the full input rules before a write. Queries use bound parameters, and indexes support sorting and status filtering. SQLite runs in WAL mode with a busy timeout.
 
 ## Validation and screen behavior
 
 - A title must contain 3–100 characters after trimming whitespace from both ends.
 - A description is optional and can contain up to 2,000 characters. An empty description is shown as a dash in the list.
-- Validation errors appear next to the relevant field. The backend checks the same rules again, even if a request bypasses the form.
+- Validation errors first appear after clicking Create. After that attempt, they update while typing and disappear only when the field becomes valid. A successful create resets this behavior for the next ticket. The backend checks the same rules again, even if a request bypasses the form.
 - The server sets the ID, creation date, and initial `open` status. These values cannot be supplied by a create request.
 - A successful create clears the form and search controls, returns to page 1, and shows the new ticket first. A failed create keeps the input and does not add an unsaved row.
 - The create button is disabled while submitting. A synchronous guard also prevents a second submission before React updates the button.
+- Retrying the same create after a connection failure reuses its request key, so a ticket that was saved before the failure is not created again.
 - Each row has all three statuses, and every transition is allowed. Selecting a status immediately sends a PATCH request; there is no separate Save button.
-- The selector is disabled during its request. On success, the current page is fetched again with the applied search and status filter. On failure, the previous status is restored and an error appears in that row.
+- The selector is disabled during its request. On success, the current page is fetched again with the applied search and status filter. On a regular failure, the previous status is restored and an error appears in that row.
+- If another user has already updated the ticket, the stale update is rejected. A message explains what happened, and the list reloads with the applied filters. The message stays visible even if the ticket no longer matches the filter.
 - If an update leaves a later page empty, the app loads an available previous page. An empty first page stays on page 1.
 - Search runs on the Search button or Enter. It combines a literal title substring with the selected status and starts at page 1. Empty search text and All Statuses apply no restriction.
 - Previous and Next use the last submitted filters, even if the search fields have since been edited. There are 10 tickets per page, and unavailable navigation buttons are disabled.
@@ -143,13 +148,17 @@ Create request:
 
 The description can be omitted. A successful create returns `201` with `{ "ticket": { ... } }`.
 
+The frontend sends an `Idempotency-Key` header with a UUID. The API also accepts requests without this header; each of those is treated as a new create. Keys must contain 1–128 letters, digits, underscores, or hyphens.
+
+Repeating a key with the same validated input returns the original `201` response and adds `Idempotency-Replayed: true`. Reusing a key with different input returns `409` with the code `IDEMPOTENCY_KEY_REUSED`. An omitted description and an empty one count as the same input, as do titles that differ only in surrounding whitespace.
+
 Status update request:
 
 ```json
-{ "status": "in_progress" }
+{ "status": "in_progress", "expectedVersion": 1 }
 ```
 
-A successful update returns `200` with the updated ticket. Invalid input returns `400`; a missing ticket returns `404`. Unknown input fields are rejected.
+Use the ticket's `version` from the list as `expectedVersion`. A successful update returns `200` with the updated ticket and its increased version. If the version has changed, the API returns `409` with the code `VERSION_CONFLICT` and `currentTicket`, without applying the stale update. Invalid input returns `400`; a missing ticket returns `404`. Unknown input fields are rejected.
 
 Errors use an `error` object with a user-facing `message` and, for validation errors, a `fields` object. Messages are in Hebrew to match the UI. Malformed JSON returns `400`, bodies larger than 32 KB return `413`, and unexpected failures return a generic `500` response. Details are logged on the server rather than sent to the browser. API responses are not cached.
 
@@ -193,13 +202,13 @@ Individual commands are also available:
 - `npm run test:e2e:ui`: The same browser tests in Playwright's interactive runner
 - `npm run build`: Type checking and the production build
 
-All 11 backend tests and 12 browser tests pass, along with type checking and the production build.
+All 15 backend tests and 15 browser tests pass, along with type checking and the production build.
 
-Backend tests cover validation boundaries, trimming, optional descriptions, seed ordering, pagination, literal Hebrew search, combined filters, status transitions, and error responses. They also check that SQL-like search text remains a literal value and that data survives closing and reopening a database file.
+Backend tests cover validation boundaries, trimming, optional descriptions, seed ordering, pagination, literal Hebrew search, combined filters, status transitions, and error responses. They also check concurrent creates with the same key, changed-input conflicts, transaction rollback, stale status updates, database migration, and replaying a saved response after reopening the database.
 
-Browser tests cover the actual form and table behavior: disabled buttons and selectors, empty descriptions, search with Enter, draft versus applied filters, create failures and retries, status rollback, empty-page navigation, late search responses, and mobile layout. They also exercise every status transition and the exact title and description length limits.
+Browser tests cover the actual form and table behavior: disabled buttons and selectors, empty descriptions, search with Enter, draft versus applied filters, create failures and retries, status rollback, empty-page navigation, late search responses, and mobile layout. They also exercise every status transition, the exact title and description length limits, live validation after the first attempt, a lost response after a real save, and conflicting updates from two tabs.
 
-API tests use an in-memory database, apart from the persistence test's temporary file. Browser tests start separate services on ports **3101 and 5174** and create a separate database under `data/e2e/`. They do not modify the local application database. Keep those test ports free.
+API tests use an in-memory database, apart from temporary files for persistence and migration checks. Browser tests start separate services on ports **3101 and 5174** and create a separate database under `data/e2e/`. They do not modify the local application database. Keep those test ports free.
 
 To open the browser test report:
 
@@ -210,17 +219,21 @@ npx playwright show-report
 ## Technical decisions
 
 - **SQLite:** keeps setup simple while still providing persistent storage and SQL. There is no database service to configure for reviewing the assignment.
-- **No ORM:** there is one table and only a few queries. Keeping the SQL explicit makes the filters and ordering easy to follow.
+- **No ORM:** there are two small tables and only a few queries. Keeping the SQL explicit makes the filters, ordering, and transactions easy to follow.
 - **Shared Zod schemas:** the frontend and backend apply the same input rules. TypeScript alone cannot validate incoming HTTP data at runtime.
 - **Server-side pagination and filtering:** the browser receives only the page it needs, along with totals for the same query.
 - **Separate draft and applied filters:** changing a field does not silently change the query used for pagination.
 - **Refetching after writes:** a status change can remove a row from the current filter or change the page count, so a fresh response is safer than only changing the local row.
 - **One root package:** installation and development commands stay simple, while folders separate frontend, backend, and shared code.
 
+## Current improvements
+
+- **Validation while correcting input:** errors appear after the first submit attempt, then update as the user types. An error stays visible until the value passes validation, so entering another invalid value does not hide it.
+- **Safe retries when creating a ticket:** the form keeps a UUID for each validated payload until a creation succeeds. If the response is lost after the server saves the ticket, retrying sends the same key and gets the original response. SQLite stores the key and ticket together, so restarting the backend does not lose this protection. The form's keys are kept in memory, so reloading or closing the browser starts a new submission. Saved server keys currently have no expiry.
+- **Protection against conflicting status updates:** each ticket has a version. The backend changes its status only if the submitted version still matches. If two users edit the same ticket, the stale request gets a conflict response instead of overwriting the newer status. The screen explains the conflict and reloads the current page with the applied search and filter, so the user can review the latest state before trying again.
+
 ## Future improvements
 
-- Add idempotency keys for ticket creation. Disabling the button prevents a second in-flight submission, but cannot tell whether a ticket was saved if the response was lost.
-- Add record versioning if several people edit the same tickets. Currently, the last status update wins.
 - Move to PostgreSQL with an asynchronous driver if traffic grows. The current synchronous SQLite connection is enough for this small app, but database work blocks the Node event loop.
 - Revisit search indexing and pagination if the dataset becomes large. Literal substring search and offset pagination keep this version simple.
 - Run the existing checks in CI and add automated accessibility checks alongside keyboard and mobile review.
@@ -233,6 +246,8 @@ npx playwright show-report
 4. Filter by Open and change a matching ticket to Closed. It should leave the results.
 5. Stop only the backend, try a search or create, then restart it and retry. Check the error and preserved input.
 6. Restart the app and confirm that created tickets and status changes are still there.
+7. Submit a title that is too short, then correct it. The error should stay until the trimmed title has at least three characters.
+8. Open the same ticket in two tabs. Change its status in one tab, then try changing it in the other. The second tab should show a conflict and load the latest results.
 
 ## Troubleshooting
 

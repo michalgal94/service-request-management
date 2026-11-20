@@ -1,6 +1,6 @@
 import express, { type ErrorRequestHandler } from 'express';
 import type { DatabaseSync } from 'node:sqlite';
-import { createTicketSchema, listTicketsSchema, updateStatusSchema } from '../shared/tickets.js';
+import { createTicketSchema, idempotencyKeySchema, listTicketsSchema, updateStatusSchema } from '../shared/tickets.js';
 import { TicketRepository } from './ticket-repository.js';
 import type { ZodError } from 'zod';
 
@@ -41,7 +41,18 @@ export function createApp(db: DatabaseSync, options: { staticDirectory?: string;
   app.post('/api/tickets', (req, res) => {
     const input = createTicketSchema.safeParse(req.body);
     if (!input.success) return res.status(400).json(validationError(input.error));
-    return res.status(201).json({ ticket: tickets.create(input.data) });
+    const rawKey = req.get('Idempotency-Key');
+    const key = idempotencyKeySchema.optional().safeParse(rawKey);
+    if (!key.success) return res.status(400).json({ error: { message: 'מפתח בקשת היצירה אינו תקין.' } });
+    const result = tickets.create(input.data, key.data);
+    if (result.kind === 'conflict') {
+      return res.status(409).json({ error: {
+        code: 'IDEMPOTENCY_KEY_REUSED',
+        message: 'מפתח הבקשה כבר שימש ליצירת פנייה עם תוכן אחר.',
+      } });
+    }
+    if (result.kind === 'replayed') res.setHeader('Idempotency-Replayed', 'true');
+    return res.status(201).json({ ticket: result.ticket });
   });
 
   app.patch('/api/tickets/:id/status', (req, res) => {
@@ -51,9 +62,16 @@ export function createApp(db: DatabaseSync, options: { staticDirectory?: string;
     }
     const input = updateStatusSchema.safeParse(req.body);
     if (!input.success) return res.status(400).json(validationError(input.error));
-    const ticket = tickets.updateStatus(id, input.data.status);
-    if (!ticket) return res.status(404).json({ error: { message: 'הפנייה לא נמצאה.' } });
-    return res.json({ ticket });
+    const result = tickets.updateStatus(id, input.data.status, input.data.expectedVersion);
+    if (result.kind === 'missing') return res.status(404).json({ error: { message: 'הפנייה לא נמצאה.' } });
+    if (result.kind === 'conflict') {
+      return res.status(409).json({ error: {
+        code: 'VERSION_CONFLICT',
+        message: 'הפנייה עודכנה בינתיים על ידי משתמש אחר. יש לבדוק את המצב העדכני ולנסות שוב.',
+        currentTicket: result.ticket,
+      } });
+    }
+    return res.json({ ticket: result.ticket });
   });
 
   app.use('/api', (_req, res) => {

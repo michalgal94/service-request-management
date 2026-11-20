@@ -15,7 +15,7 @@ interface Props {
   rowErrors: Record<number, string>;
   onRetry: () => void;
   onPage: (page: number) => void;
-  onStatusChange: (id: number, status: TicketStatus) => void;
+  onStatusChange: (id: number, status: TicketStatus, version: number) => void;
 }
 
 export function TicketList({ data, loading, error, page, filtered, updating, rowErrors, onRetry, onPage, onStatusChange }: Props) {
@@ -49,7 +49,7 @@ export function TicketList({ data, loading, error, page, filtered, updating, row
                 <td className="ticket-date"><time dateTime={ticket.created_at} title={fullDateFormat.format(new Date(ticket.created_at))}>{dateFormat.format(new Date(ticket.created_at))}</time></td>
                 <td className="ticket-status">
                   <StatusSelect label={`סטטוס פנייה ${ticket.id}`} value={updating[ticket.id] ?? ticket.status}
-                    disabled={pending} onChange={(status) => { if (status) onStatusChange(ticket.id, status); }}
+                    disabled={pending} onChange={(status) => { if (status) onStatusChange(ticket.id, status, ticket.version); }}
                     errorId={rowError ? `status-error-${ticket.id}` : undefined} />
                   {pending && <span className="row-saving" role="status">שומר…</span>}
                   {rowError && <p id={`status-error-${ticket.id}`} className="field-error" role="alert">{rowError}</p>}

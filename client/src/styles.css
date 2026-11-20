@@ -54,7 +54,6 @@ input[type=search]::-webkit-search-cancel-button{cursor:pointer}
 .panel-heading{display:flex;align-items:center;gap:12px;padding:22px 22px 20px;border-bottom:1px solid #e7edf0;min-height:91px}
 .panel-heading h2{font-size:1.125rem;font-weight:700}
 .panel-heading p{font-size:.875rem;color:var(--muted);margin-top:3px}
-.heading-icon{width:36px;height:36px;border-radius:9px;color:var(--brand);background:#eaf5f2;display:grid;place-items:center}
 .create-form{padding:23px 22px}
 .field+.field{margin-top:23px}
 .required{color:var(--brand);margin-inline-start:2px}
@@ -109,6 +108,7 @@ tbody tr:hover{background:#fbfdfd}
 .error-state .button{margin-top:5px}
 .error-banner{display:flex;gap:8px;align-items:flex-start;padding:11px 12px;background:#fff1f3;border:1px solid #f0c9cf;border-radius:7px;color:var(--danger);font-size:.875rem;line-height:1.7;margin-bottom:15px}
 .error-banner .icon{width:17px;height:17px;margin-top:3px}
+.success-region>.error-banner{margin-bottom:0}
 .field-error{color:var(--danger);font-size:.8125rem;margin-top:7px;line-height:1.65}
 .row-saving{display:block;font-size:.8125rem;color:var(--muted);margin-top:4px}
 .spinner{display:inline-block;width:17px;height:17px;border:2px solid currentColor;border-inline-end-color:transparent;border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0}
