@@ -21,7 +21,6 @@ h1,h2,h3,p{margin:0}
 .brand-section{color:var(--muted);font-size:.875rem}
 .workspace{max-width:1400px;margin:auto;padding:38px 40px 20px}
 .page-heading{margin-bottom:27px}
-.eyebrow{font-size:.875rem;font-weight:600;color:var(--brand);margin-bottom:4px}
 h1{font-size:2rem;font-weight:800;letter-spacing:-.7px;line-height:1.5}
 .page-heading>p{color:var(--muted);font-size:1rem;margin-top:5px}
 .search-panel{display:flex;align-items:end;gap:16px;background:white;border:1px solid var(--border);border-radius:12px;padding:20px 24px;box-shadow:0 2px 5px #233b4803}

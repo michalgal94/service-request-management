@@ -52,7 +52,7 @@ export function App() {
       <header className="topbar"><div className="topbar-inner"><span className="brand-icon"><Icon name="service" /></span>
         <span className="brand-name">מוקד שירות</span><span className="brand-divider" /><span className="brand-section">ניהול פניות</span></div></header>
       <main id="main" className="workspace">
-        <div className="page-heading"><div className="eyebrow">ניהול ומעקב</div><h1>פניות שירות</h1><p>כל הפניות במקום אחד, מהפתיחה ועד לסיום הטיפול.</p></div>
+        <div className="page-heading"><h1>פניות שירות</h1><p>כל הפניות במקום אחד, מהפתיחה ועד לסיום הטיפול</p></div>
         <SearchBar key={searchKey} onSearch={(filters) => { setSuccess(''); setConflict(''); tickets.search(filters); }} />
         <div className="success-region">
           {success && <div className="success-banner" role="status"><Icon name="check" /><span>{success}</span></div>}
